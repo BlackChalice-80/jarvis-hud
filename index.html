@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#04070f" />
+<title>JARVIS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root { --cyan:#3fd0ff; --cyan-dim:#2792dc; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; }
+  body {
+    font-family:'Rajdhani',system-ui,sans-serif;
+    background:radial-gradient(circle at 50% 38%, #0a1830 0%, #060c1a 45%, #03060e 100%);
+    color:#cfe9ff; min-height:100vh; min-height:100dvh;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; overflow:hidden; position:relative; padding:24px;
+  }
+  /* arc-reactor glow + rings behind the title */
+  .reactor { position:fixed; top:38%; left:50%; transform:translate(-50%,-50%); width:min(78vw,560px); height:min(78vw,560px); pointer-events:none; z-index:0; }
+  .reactor::before { content:""; position:absolute; inset:0; border-radius:50%;
+    background:radial-gradient(circle, rgba(63,208,255,0.22) 0%, rgba(63,208,255,0.06) 38%, transparent 70%);
+    animation:pulse 4.5s ease-in-out infinite; }
+  .ring { position:absolute; inset:0; border-radius:50%; border:1px solid rgba(63,208,255,0.16); }
+  .ring.r2 { inset:14%; border-color:rgba(63,208,255,0.12); }
+  .ring.r3 { inset:30%; border-color:rgba(63,208,255,0.10); animation:spin 28s linear infinite; border-style:dashed; }
+  @keyframes pulse { 0%,100%{opacity:.55;transform:scale(1);} 50%{opacity:1;transform:scale(1.04);} }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .wrap { position:relative; z-index:1; display:flex; flex-direction:column; align-items:center; gap:10px; }
+  .status { font-size:13px; letter-spacing:6px; color:var(--cyan); opacity:.85; }
+  .status b { color:#9fe4ff; }
+  h1 { font-family:'Orbitron',sans-serif; font-weight:900; font-size:clamp(56px,17vw,150px); letter-spacing:.12em;
+    color:#bff0ff; text-shadow:0 0 18px rgba(63,208,255,.85),0 0 48px rgba(39,146,220,.55); line-height:1; }
+  .sub { font-size:clamp(12px,3.4vw,18px); letter-spacing:.42em; color:#7fb7e0; opacity:.8; }
+  .tap { margin-top:6px; font-size:13px; letter-spacing:4px; color:var(--cyan); opacity:.7; animation:pulse 3s ease-in-out infinite; }
+  .chips { margin-top:26px; display:flex; flex-wrap:wrap; gap:10px 12px; justify-content:center; max-width:560px; z-index:1; }
+  .chip { font-size:12px; letter-spacing:2.5px; padding:8px 16px; border-radius:999px;
+    border:1px solid rgba(63,208,255,.45); color:#bfe9ff; background:rgba(63,208,255,.05);
+    box-shadow:0 0 12px rgba(63,208,255,.12) inset; }
+  .chip span { color:var(--cyan); margin-right:6px; }
+  footer { position:fixed; bottom:18px; left:0; right:0; text-align:center; font-size:11px; letter-spacing:5px; color:#3c5f80; z-index:1; }
+</style>
+</head>
+<body>
+  <div class="reactor"><div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div></div>
+  <div class="wrap">
+    <div class="status">&#9670;&nbsp; SYSTEM <b>ONLINE</b> &nbsp;&#9670;</div>
+    <h1>JARVIS</h1>
+    <div class="sub">PERSONAL&nbsp;AI&nbsp;ASSISTANT</div>
+    <div class="tap">TAP TO TALK</div>
+  </div>
+  <div class="chips">
+    <div class="chip"><span>&#9679;</span>WEB LOOKUP</div>
+    <div class="chip"><span>&#9679;</span>EMAIL</div>
+    <div class="chip"><span>&#9679;</span>CALENDAR</div>
+    <div class="chip"><span>&#9679;</span>NOTES</div>
+  </div>
+  <footer>STARK INDUSTRIES &middot; MARK VII</footer>
+
+  <elevenlabs-convai agent-id="agent_6401kw6ccwrzetjvgarqx90wyfmf"></elevenlabs-convai>
+  <script src="https://unpkg.com/@elevenlabs/convai-widget-embed" async type="text/javascript"></script>
+</body>
+</html>
