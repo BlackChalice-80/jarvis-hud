@@ -1,0 +1,15 @@
+﻿[ti:Fixture Tricky]
+[ar:Test Signal]
+[length: 1:30]
+[offset:+500]
+[00:05.00]First line here
+[00:10.5]Short fraction line
+[00:15.250]Millisecond line
+[00:20:30]Colon fraction line
+[00:30.00][01:00.00]Repeated hook line
+[00:25.00]Out of order line
+[00:35.00]
+[00:36.00]
+[00:40.00]<00:40.00>Word <00:40.50>level <00:41.00>tags
+untimed line that should be ignored
+[01:05.00]Last line

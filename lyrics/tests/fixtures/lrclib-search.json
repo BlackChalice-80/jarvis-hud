@@ -1,0 +1,41 @@
+[
+  {
+    "id": 9001,
+    "name": "Paper Lanterns",
+    "trackName": "Paper Lanterns",
+    "artistName": "The Placeholders",
+    "albumName": "Fixture Sessions",
+    "duration": 184,
+    "instrumental": false,
+    "hasWordSync": false,
+    "plainLyrics": "Paper lanterns over the river\nCarry every wish we made\n\nHold the light and let it wander\nNothing here is meant to fade\nPaper lanterns over the river\nCarry every wish we made",
+    "syncedLyrics": "[00:12.40] Paper lanterns over the river\n[00:17.10] Carry every wish we made\n[00:22.00] \n[00:34.50] Hold the light and let it wander\n[00:39.20] Nothing here is meant to fade\n[00:44.00] Paper lanterns over the river\n[00:48.70] Carry every wish we made\n[00:54.00] ",
+    "lyricsfile": null
+  },
+  {
+    "id": 9002,
+    "name": "Paper Lanterns (Live)",
+    "trackName": "Paper Lanterns (Live)",
+    "artistName": "The Placeholders",
+    "albumName": "Fixture Sessions Live",
+    "duration": 201.5,
+    "instrumental": false,
+    "hasWordSync": false,
+    "plainLyrics": "Paper lanterns over the river\nCarry every wish we made\n\nHold the light and let it wander\nNothing here is meant to fade",
+    "syncedLyrics": null,
+    "lyricsfile": null
+  },
+  {
+    "id": 9003,
+    "name": "Paper Lanterns Interlude",
+    "trackName": "Paper Lanterns Interlude",
+    "artistName": "The Placeholders",
+    "albumName": "Fixture Sessions",
+    "duration": 62,
+    "instrumental": true,
+    "hasWordSync": false,
+    "plainLyrics": null,
+    "syncedLyrics": null,
+    "lyricsfile": null
+  }
+]
