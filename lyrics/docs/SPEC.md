@@ -97,6 +97,7 @@ lyrics/
     platform.js            capability detection, fullscreen, wake lock (shell)
     format.js              (core)        lrc.js (core)        timing.js (core)       clock.js (core)
     song.js                (data)        store.js (data)      lrclib.js (net)        demo.js (done)
+    paste.js               cleanPastedLyrics for text copied from web pages (pure, done)
     ui/dom.js              h(), icon(), toast host, confirm sheet, debounce (shell)
     ui/lyric-column.js     shared lyric column renderer for perform + sync (perform)
     ui/perform-view.js     (perform)     ui/sync-view.js (perform)
@@ -432,6 +433,18 @@ export function createLrclibClient({ fetch = globalThis.fetch, base = LRCLIB_BAS
   // 429 / 503 → retry ONCE after delay = Retry-After (delta-seconds or HTTP-date) clamped to [0.5, 3] s, default 1 s
   //   (in browsers the header is usually unreadable due to CORS). The wait is cancelled by the signal. A second 429/503 → kind 'busy'.
   // Other non-2xx (except 404 on get/getById) → kind 'http' with status. Body not JSON → 'parse'. search with a non-array body → 'parse'.
+export async function findLyrics(client, { title = '', artist = '' }, { signal } = {})
+  // Search cascade so typos and odd metadata still find a match. Steps, stopping at the first that returns ≥ 1 candidate:
+  //   1. client.search({ title, artist })        (skipped if title is empty)
+  //   2. client.search({ q: `${title} ${artist}`.trim() })   (only if artist is non-empty)
+  //   3. client.search({ title })                (only if artist is non-empty)
+  //   4. client.search({ q: normalizeForMatch(title) }) (only if it differs from title, e.g. "(Live)"/"feat." suffixes removed)
+  // → { candidates: rankCandidates(results, { title, artist }), strategy: 'exact'|'freetext'|'title-only'|'simplified'|'none' }.
+  // Errors (other than 'aborted', which propagates) from a later step after an earlier step succeeded are impossible (we stop);
+  // an error in any step propagates. Unit-tested with a fake client.
+export function webSearchUrl({ title = '', artist = '' }, engine = 'google')
+  // → URL string for a manual web search, opened by the user in a new tab: google → https://www.google.com/search?q=<"title" artist lyrics>
+  //   (title quoted when non-empty, URLSearchParams-encoded). Pure; no fetching.
 export function normalizeTrack(raw)
   // LRCLIB JSON → Candidate { lrclibId: number, title, artist, album, duration: number (seconds, 0 if missing),
   //   instrumental: boolean, hasSynced: boolean (syncedLyrics has ≥ 1 timed line), hasPlain: boolean (non-blank plainLyrics),
@@ -764,13 +777,40 @@ export function fmtDate(ms)               // → "Oct 25, 2026" (toLocaleDateStr
   Tapping a result opens an inline preview: the first 8 sung lines, the
   timing type, and buttons for **Save & perform** (primary), **Save to
   library** and **Back to results**.
+- Searching uses `findLyrics`. When it succeeded with a looser strategy
+  than `exact`, a small note above the results says "No exact match,
+  showing close results."
 - **Messages**:
   - `offline`: "You're offline. You can still paste lyrics below."
   - `network` / `timeout` / `busy`: "Couldn't reach the lyrics service. Try
     again, or paste lyrics below."
   - No results: "No lyrics found for “…”. Check the spelling, try without
     the artist, or paste them below."
+- **Search the web (manual fallback)**: when there are no results or an
+  error (other than offline), show a prominent **"Search Google for the
+  lyrics"** button. It's also always available as a smaller link under the
+  results.
+  - It opens `webSearchUrl({ title, artist })` with
+    `window.open(url, '_blank', 'noopener')` (a plain
+    `<a target="_blank" rel="noopener">` works too). It also expands the
+    paste section and shows the 3-step hint: "1. Find the lyrics (Google
+    often shows them right on the results page). 2. Select all and copy.
+    3. Come back and tap Paste."
+  - The app never fetches or scrapes web pages itself, and never sends
+    lyrics to an AI service. The user copies the text, which keeps it legal
+    and free of made-up lines.
 - **"Paste lyrics instead"** is always available as a collapsible section.
+  - A **"Paste from clipboard"** button calls
+    `navigator.clipboard.readText()` inside the tap. It's shown only when
+    that API exists. On failure (permission denied), it focuses the textarea
+    and hints "Long-press here and choose Paste".
+  - Pasted web text is cleaned with `cleanPastedLyrics(text)`, imported from
+    `js/paste.js` (pure, done, tests in tests/unit/paste.test.js). It trims each line; drops common page junk lines ("Embed",
+    "You might also like", lines that are only a number + "Contributors",
+    "Lyrics" headers ending in "Lyrics", "See … Live", "Get tickets as low
+    as…", "Translations"); turns 3+ blank lines into one blank line; and
+    keeps section headers so parsePlain can turn them into labels.
+    Unit-tested with original junk-laden fixture text.
   It uses the same title and artist fields, a textarea (plain or LRC,
   auto-detected with a live hint such as "Detected timed lyrics (LRC), 42
   lines" or "Plain lyrics, 42 lines: timing will be estimated"), a
