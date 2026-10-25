@@ -188,7 +188,8 @@ export function parseTime(str)             // "3:25" | "03:25" | "205" | "3:25.5
                                            // invalid: "", "abc", "3:75", "-1", "1:2:3:4" → null. NOT used for LRC tags.
 export function normalizeForMatch(str)     // lowercase; strip diacritics (NFD + remove \p{M}); drop "(feat. …)", "[…]",
                                            // " - Remastered …", " - Live …", " - Radio Edit"; '&' → 'and';
-                                           // collapse non-[a-z0-9] to single spaces; trim
+                                           // collapse runs of non-letter/digit chars (not [\p{L}\p{N}]) to single spaces; trim
+                                           // (Latin text ends up [a-z0-9]; other scripts are kept so they don't all match '')
 export function escapeHtml(str)
 ```
 
@@ -216,11 +217,13 @@ export function parseLrc(text, { keepUntimed = false } = {})
   //   offset: optional whitespace/sign, integer or decimal ms; invalid → ignored; several → the LAST wins.
   //   The offset applies to ALL timed lines wherever the tag appears: t = max(0, t - offsetMs/1000) (clamp AFTER shifting).
   //   meta.offsetMs is informational only: lines are already shifted and no caller may apply it again.
-  // - An untimed line matching parseSectionHeader (and not a metadata key) sets `section` on the next timed SUNG line.
+  // - An untimed line matching parseSectionHeader (and not a metadata key) sets `section` on the next timed SUNG line
+  //   (every Line of a multi-tag source line; with keepUntimed a kept untimed line also counts).
   // - Other untimed, non-blank, non-metadata lines are counted in `untimed`. keepUntimed=false → dropped.
   //   keepUntimed=true → each run of m untimed lines between timed source lines at ta and tb gets
   //   t = ta + (tb - ta) * k/(m+1), k = 1..m (ta = 0 before the first timed line; after the last timed line t = ta + 2k;
-  //   if tb < ta all get ta). Interpolated lines keep source position for the stable sort.
+  //   if tb < ta all get ta). ta/tb = the (shifted) FIRST tag of those source lines. Interpolated lines keep source position
+  //   for the stable sort.
   // - Empty text after a tag → '' gap marker.
   // - Sort: stable by (t, source line number, tag position within the line). Then: exact duplicate (t, text) pairs keep one;
   //   '' markers equal in t to a sung line are dropped; consecutive '' runs keep only the FIRST; a leading '' is dropped.
@@ -229,7 +232,8 @@ export function parseLrc(text, { keepUntimed = false } = {})
 export function serializeLrc(lines, meta = {})
   // Emits [ti:], [ar:], [al:], [length:m:ss] from meta when present. NEVER emits [offset:].
   // Each line: cs = Math.round(t*100); mm = floor(cs/6000) zero-padded to ≥ 2; ss = floor((cs%6000)/100) padded 2; xx = cs%100 padded 2
-  //   → "[mm:ss.xx]text". 59.999 → "[01:00.00]". A line with a section is preceded by its label on its own line: "[Chorus]".
+  //   → "[mm:ss.xx]text". 59.999 → "[01:00.00]". A sung line with a section is preceded by its label on its own line: "[Chorus]"
+  //   (only labels parseSectionHeader accepts; others are omitted so they never come back as lyric lines).
   // Round-trip: parseLrc(serializeLrc(x.lines, x.meta)).lines deep-equals x.lines within ±0.005 s, sections included.
 export function parsePlain(text)
   // → Array<{ text: string, section?: string }> (no times)
@@ -241,6 +245,7 @@ export function parsePlain(text)
   // - A bracketed line that is NOT a known section (e.g. "[Spoken softly]") is kept as a lyric line.
   // Fixture: tests/fixtures/plain-with-sections.txt → 4 gap-separated stanzas, sections Verse 1, Chorus, Verse 2, Chorus.
 export function lyricsToEditableText(song) // 'synced'|'tapped' → serializeLrc(song.lines); 'estimated' → song.rawPlain
+                                           // (blank rawPlain → plain text rebuilt from the lines, sections as "[Label]")
 ```
 
 ### `js/timing.js` (pure)
@@ -282,9 +287,9 @@ export function gapInfo(lines, time, offset, duration, threshold = 6)
   //   outro (n === -1):            waitStart = lineEnd(lines, e, offset, duration), waitEnd = duration
   // null unless time >= waitStart AND waitEnd - waitStart >= threshold. Otherwise
   // { kind, nextIndex: n, secondsUntilNext: max(0, waitEnd - time), progress: clamp((time - waitStart)/(waitEnd - waitStart), 0, 1) }.
-  // The pill shows Math.ceil(secondsUntilNext). Tests: sung at 10 (est 2 s) and 30, threshold 6: 11.9 → null; 12 → break,
-  // secondsUntilNext 18, progress 0; 29.5 → break; 30 → null. With a '' marker at 11 the break starts at 11. First sung line at
-  // display time 4 → no intro. lines [] → null.
+  // The pill shows Math.ceil(secondsUntilNext). Tests: sung at 10 (est ≈ 2 s: 6 syllables → 1.92 s) and 30, threshold 6:
+  // 11.9 → null; 12 → break, secondsUntilNext 18, progress ≈ 0 (exactly 0 at 11.92); 29.5 → break; 30 → null.
+  // With a '' marker at 11 the break starts at 11. First sung line at display time 4 → no intro. lines [] → null.
 export function holdPoint(lines, time, offset, duration, { threshold = 6, lead = 0.45 } = {})
   // Band mode. g = gapInfo(...); g null or g.kind === 'outro' → null; else { at: D(g.nextIndex) - lead, nextIndex: g.nextIndex }.
   // (Because threshold ≥ 3 > lead, `at` always lies inside the wait.)
@@ -292,7 +297,8 @@ export function cueIndex(lines, time, offset, dir, { started = true, snap = 1.2 
   // Pedal semantics: "the line I mean is starting NOW". dir 'next' | 'prev'. Returns a sung line index, or -1 (no-op).
   // f = firstSungIndex; f === -1 → -1.
   // Not started (pre-roll), or time < D(f): next → f; prev → -1.
-  // Else span = activeSpan(lines, time, offset); c = sung line at or before span.start (span.start if sung, else prevSungIndex);
+  // Else span = activeSpan(lines, time, offset); c = sung line at or before span.start (span.start if sung, else prevSungIndex,
+  //   then moved to the START of its equal-t run);
   //   cEnd = last index of c's equal-t run; n = nextSungIndex(lines, cEnd).
   //   next: s = n === -1 ? snap : min(snap, 0.5 * (D(n) - D(c)));  time - D(c) < s → c (confirm a line that just lit up), else n.
   //   prev: p = prevSungIndex(lines, c) — then move p to the START of its equal-t run; p === -1 → c.
@@ -302,6 +308,7 @@ export function shiftLines(lines, delta)   // new array, t = max(0, t + delta); 
 export function validateLines(lines, duration, { fit = false } = {})
   // New array: drops entries with non-finite t or non-string text; t = max(0, t); text truncated to 1000 chars; ≤ 5000 lines;
   // stable sort; applies the marker invariants above. fit=true (estimated songs only) also clamps t ≤ duration. Never throws.
+export function applyMarkerInvariants(sorted) // the marker invariants on already-sorted lines (shared by parseLrc/validateLines)
 ```
 
 ### `js/clock.js` (pure)
@@ -334,11 +341,12 @@ export class Clock {
                       //   Never moves time backwards (negative drift, e.g. a wall-clock jump back, → 0).
   tick()              // If more than 1 s of now() passed since the previous tick → resync() first. Then auto-end check. Returns time.
   on(event, fn, { signal } = {}) → unsubscribe   // events: 'play','pause','seek','rate','ended'. Listener errors are caught +
-                      // console.error'd. An aborted signal removes the listener.
+                      // console.error'd. An aborted signal removes the listener. Payloads: play/pause/ended { time },
+                      // seek { time, reason }, rate { rate, time }.
   snapshot()          // → { time, playing, rate, wallMs: wallNow() * 1000 }
   static restore(snap, { now, wallNow, duration } = {})
                       // → Clock: rate = snap.rate; time = snap.playing ? snap.time + (wallNow()*1000 - snap.wallMs)/1000 * rate : snap.time
-                      //   (clamped to duration); playing iff snap.playing && time < duration.
+                      //   (elapsed clamped ≥ 0, time clamped to duration); playing iff snap.playing && time < duration. No events.
 }
 ```
 Tests use fake `now`/`wallNow`. Example: duration 10. Play at 0, then
@@ -374,7 +382,8 @@ export function updateSongText(song, text, now = Date.now())
   //   'synced'; rawSynced = text; duration = max(song.duration, lastT + 1). Plain → 'estimated' with song.estimate; rawPlain = text.
   // NEW song (inputs never mutated); updatedAt = now. offset/rate/mode unchanged.
 export function retime(song, { duration, leadIn, outro } = {}, now = Date.now())
-  // leadIn/outro: undefined = keep, null = auto, number = fixed. Estimated → recompute lines from rawPlain with the new duration/estimate.
+  // leadIn/outro: undefined = keep, null = auto, number = fixed. Estimated → recompute lines from rawPlain with the new duration/estimate
+  //   (blank rawPlain → from the current lines' text/section).
   // Synced/tapped → duration = max(patch.duration ?? duration, lastT + 1); lines deep-equal to the input.
   // Test: synced, last t = 200, retime({ duration: 180 }) → duration 201, lines unchanged. Returns a NEW song.
 export function applyTappedTimes(song, times, { endTime = 0, now = Date.now() } = {})
@@ -396,11 +405,12 @@ export function normalizeSong(obj, now = Date.now())
   // Tolerant coercion of partial/old records into a valid Song; never throws. Builds a NEW object from whitelisted fields only
   // (never spreads input). Applies MIGRATIONS for schema < SCHEMA. schema > SCHEMA → returns the record as-is plus readOnly: true.
   // Defaults: mode 'track', rate 1 (clamped 0.5..1.5), offset 0 (clamped -30..30), estimate {null,null}, timing 'estimated' if unknown.
-  // Lines → validateLines(lines, duration, { fit: timing === 'estimated' }); synced/tapped → duration raised to ≥ lastT + 1.
+  // Lines → validateLines(lines, duration, { fit: timing === 'estimated' }); synced/tapped → duration raised to ≥ lastT + 1
+  // (lines with t > LIMITS.duration - 1 are dropped so duration stays ≤ 21600). Every song constructor returns normalizeSong(...).
 export function validateSongInput(obj, now = Date.now())
   // Imports → { ok: true, song } | { ok: false, reason }. Requires a non-empty string title (truncated to 300); lines an array of
   // ≤ 5000 entries, each with finite t and string text (truncated to 1000); a finite duration in (0, 21600] (missing → derived as
-  // lastT + 5 for synced/tapped, else 210). Invalid id (/^[A-Za-z0-9_-]{1,64}$/) → newId(). updatedAt ≤ now + 86400000.
+  // lastT + 5 for synced/tapped, else 210). Invalid id (/^[A-Za-z0-9_-]{1,64}$/) → newId(). updatedAt > now + 86400000 → rejected.
   // Output goes through normalizeSong.
 export function songSummary(song)          // { id, title, artist, duration, timing, mode, sungLines, lastPlayedAt, playCount }
 export function sameSong(a, b)             // normalizeForMatch(title) and normalizeForMatch(artist) both equal
@@ -529,7 +539,8 @@ export function capabilities()  // { secure, serviceWorker, wakeLock, fullscreen
   // standalone: matchMedia('(display-mode: standalone)').matches || navigator.standalone === true
   // ios: iPhone/iPad/iPod UA or (MacIntel && maxTouchPoints > 1); iosBrowserTab: ios && !standalone
 export function requestFullscreen(el), exitFullscreen(), fullscreenElement()   // standard API with webkit-prefixed fallback; never throw (return a Promise)
-export function onFullscreenChange(fn, { signal })
+  // requestFullscreen(el = documentElement) / exitFullscreen() resolve to a boolean: true if the call was made and didn't reject.
+export function onFullscreenChange(fn, { signal })   // → unsubscribe(); unprefixed event where supported, else webkitfullscreenchange
 export function createWakeLock({ signal })
   // → { get state(): 'held'|'released'|'denied'|'unsupported', request(): Promise<void>, onchange: fn|null }
   // request() is safe to call often (no-op while held). Re-requests on the sentinel's 'release' event and on visibilitychange→visible,
@@ -542,6 +553,10 @@ export function createRouter(routes, { onNotFound })  // routes: Array<[pattern,
   // Listens to hashchange. '#/song/abc/perform?x=1' → handler({ path, params: { id: 'abc' }, query: { x: '1' } }).
   // Params are decodeURIComponent-ed. router.go(path, { replace }) sets location.hash (replace → location.replace).
   // router.start() dispatches the current hash (empty → '#/'). router.current → the last route object.
+  // Options also take { win } (default globalThis.window) so tests can pass a fake window. router.stop() removes the listener.
+  // go() to the hash that is already current re-dispatches (browsers fire no hashchange then). Empty path segments are ignored
+  // ('/add/' matches '/add'); a malformed %-escape in a param stays raw. Also exported (pure): parseHash(hash) → { path, query },
+  // matchPattern(pattern, path) → params | null.
 ```
 Routes:
 | hash | view |
@@ -638,13 +653,22 @@ export function h(tag, props = null, ...children)
   // props: { class: string|string[]|{name: bool}, style: string|object, dataset: object, on: { event: fn | [fn, opts] },
   //          attrs: object (setAttribute), ...anything else assigned as a property (value, checked, type, tabIndex, htmlFor, hidden, disabled…) }
   // children: strings (text nodes, never parsed as HTML), Nodes, arrays (flattened), null/false/undefined (skipped).
+  // Keys containing '-' (aria-label, data-x) and `role` are set as attributes (true → '', false/null → absent, but aria-* booleans
+  // → 'true'/'false'). value/checked are assigned after the children
+  // (a <select>'s value needs its options). A string/Node/array in the props slot is treated as the first child.
 export function icon(name, { size = 24, title } = {})   // inline <svg aria-hidden> (stroke=currentColor). Names: play, pause, prev, next,
   // back, gear, plus, more, search, fullscreen, fullscreen-exit, lock, unlock, music, check, x, trash, edit, upload, download, share,
-  // sync, minus, restart, list. Unknown name → empty svg.
-export function createToastHost(container) // → { show(msg, kind = 'info'|'error'|'ok', ms = 3500) } ; aria-live="polite"
-export function confirmSheet(message, { ok = 'OK', cancel = 'Cancel', danger = false, detail } = {}) // → Promise<boolean>; Esc/backdrop = false
-export function openSheet({ title, content, onClose })  // bottom sheet with backdrop + close button → { el, close() }; Esc closes
-export function debounce(fn, ms)          // → wrapped fn with .flush() (runs pending call now) and .cancel()
+  // sync, minus, restart, list. Unknown name → empty svg. With title: role="img" + aria-label + <title> instead of aria-hidden.
+  // class="icon icon-<name>". ICON_NAMES lists every name.
+export function createToastHost(container) // → { el, show(msg, kind = 'info'|'error'|'ok', ms = 3500) → { close() } } ; aria-live="polite"
+  // index.html provides <div id="toast-host" class="toast-host">. Max 3 visible (oldest leave first); tap dismisses; ms ≤ 0 = sticky.
+export function confirmSheet(message, { ok = 'OK', cancel = 'Cancel', danger = false, detail, signal } = {}) // → Promise<boolean>; Esc/backdrop = false
+  // message is the sheet title; danger → red OK and Cancel gets focus.
+export function openSheet({ title, content, onClose, signal })  // bottom sheet with backdrop + close button → { el, body, close() }; Esc closes
+  // Esc closes only the topmost sheet (window keydown, capture). Tab is trapped inside; focus returns to the opener on close.
+  // onClose(reason: 'esc'|'backdrop'|'close'|'abort'|'api'|…) runs once. An aborted signal (e.g. ctx.signal) closes it.
+export function sheetOpen()               // true while any sheet is open: main.js should skip view.onKey for Escape then
+export function debounce(fn, ms)          // → wrapped fn with .flush() (runs pending call now, returns its result), .cancel(), .pending()
 export function downloadText(filename, text, mime = 'application/json')  // Blob + <a download>; revokes the URL after 60 s
 export function fmtDate(ms)               // → "Oct 25, 2026" (toLocaleDateString), 0 → "never"
 ```
@@ -656,12 +680,22 @@ export function fmtDate(ms)               // → "Oct 25, 2026" (toLocaleDateStr
     `--info`, `--warn`, `--danger`.
   - Shape and type: `--radius` (12px), `--tap` (48px), `--font-ui`.
   - Lyrics: `--font-scale`, `--line-spacing`, `--anchor`, `--scroll-ms`.
+  - Extras: `--surface-3`, `--raised` (sheets), `--border-strong`,
+    `--danger-bg`/`--danger-fg`, `--focus`, `--tap-lg` (60px),
+    `--radius-sm`/`--radius-lg`, spacing `--sp-1..8` (4 8 12 16 24 32 48
+    64px), type `--fs-xs..2xl` (13 15 17 20 24 32px), `--gutter`
+    (safe-area side padding), `--font-mono`, `--lyric-size` (the base
+    lyric size formula, computed on `<html>`). Theme blocks also work on a
+    nested element (e.g. a theme preview swatch).
 
   main.js sets the lyric variables on `<html>` from settings.
 - **Classes**:
   - Pages: `.page` (scrollable page root, safe-area padded),
     `.page-inner` (max-width 760px, centered), `.page-header` (sticky
-    header row with title and actions).
+    header row with title and actions). `.page` is the scroll container
+    (height 100dvh, overflow-y auto): save/restore its `scrollTop`, not
+    the window's. Put `.page-header` first inside `.page`; its background
+    is full-bleed and its content lines up with `.page-inner`.
   - Buttons: `.btn` (48px min height), `.btn-primary`, `.btn-ghost`,
     `.btn-danger`, `.btn-icon` (square 48px), `.btn-lg` (56–64px, larger
     text), `.btn-block`.
@@ -680,6 +714,13 @@ export function fmtDate(ms)               // → "Oct 25, 2026" (toLocaleDateStr
   - Layout and utilities: `.spinner`, `.empty`, `.muted`, `.row` (flex
     row with gap), `.stack` (flex column with gap), `.grow`,
     `.visually-hidden`, `.card`.
+  - Also available: `.btn[aria-pressed=true]` (toggled button),
+    `.seg-block` (full-width segmented control), `.range` with optional
+    `style="--fill: 40%"` (filled track in Blink/WebKit), `.sheet-title`,
+    `.sheet-actions`, `.sheet-detail`, `.row-wrap`, `.stack-sm`/`.stack-lg`,
+    `.truncate`, `.tabular` (tabular numbers), `.mono`, styled `<kbd>`.
+    `.input[aria-invalid=true]` shows the error state; `.field-error:empty`
+    is hidden.
 - **Ownership**: views.css styles only selectors under `.v-library`,
   `.v-add`, `.v-edit` and `.v-settings`. perform.css styles only selectors
   under `.v-perform`, `.v-sync` and `.lyric-*`. View roots carry their
@@ -1049,6 +1090,15 @@ pedalKeys take precedence over the defaults.
   list every shipped runtime file (not tests, tools or docs). `npm run sw:stamp`
   (`tools/stamp-sw.mjs`) regenerates both. VERSION is the first 8 hex chars
   of the SHA-256 over the sorted asset paths and contents.
+  - Shipped files: `index.html`, `manifest.webmanifest`, `css/*.css`,
+    `js/**/*.js`, `icons/*` (dotfiles skipped). ASSETS order: `'./'`, then
+    those groups in that order, each sorted. Hash input: for each path
+    sorted by code unit (`'./'` excluded), `path + '\0' + bytes + '\0'`.
+  - `node tools/stamp-sw.mjs --check` exits 1 when sw.js is stale. Re-run
+    `npm run sw:stamp` after adding, removing or editing any shipped file;
+    `tests/unit/sw.test.js` fails until you do.
+  - Every fetch reads only this version's own cache (never `caches.match`),
+    so a waiting worker's newer files can't leak into the running page.
 - **install**: `cache.addAll(ASSETS.map(u => new Request(new URL(u, self.registration.scope), { cache: 'reload' })))` into
   `'stagelyrics-' + VERSION`. No skipWaiting.
 - **activate**: delete every `stagelyrics-*` cache except the current one,

@@ -1,0 +1,21 @@
+{
+  "name": "StageLyrics",
+  "short_name": "StageLyrics",
+  "description": "Big, time-synced scrolling lyrics for vocalists on stage. Works offline.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["fullscreen", "standalone"],
+  "background_color": "#000",
+  "theme_color": "#000",
+  "orientation": "any",
+  "lang": "en",
+  "dir": "ltr",
+  "categories": ["music", "entertainment", "productivity"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
