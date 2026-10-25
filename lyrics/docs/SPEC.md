@@ -129,12 +129,13 @@ lyrics/
  *   album: string,              // may be ''
  *   duration: number,           // seconds, 0 < duration ≤ 21600 (default 210 when unknown)
  *   timing: 'synced'|'estimated'|'tapped',
- *   lines: Line[],              // sorted by t ascending (stable), 0 ≤ t ≤ duration, ≤ 5000 entries
+ *   lines: Line[],              // sorted by t, non-decreasing (stable), t ≥ 0, ≤ 5000 entries (see invariants)
  *   source: { provider: 'lrclib'|'manual'|'demo', lrclibId?: number },
  *   rawPlain: string,           // plain lyrics text (no timestamps), kept for re-estimation
  *   rawSynced: string,          // original LRC text if any, else ''
- *   estimate: { leadIn: number|null, outro: number|null }, // null = automatic defaults
- *   offset: number,             // seconds, -30..30; positive = lyrics appear LATER
+ *   estimate: { leadIn: number|null, outro: number|null }, // null = auto, recomputed from the CURRENT duration
+ *   offset: number,             // song seconds, -30..30; positive = lyrics appear LATER (scales with rate:
+ *                               // a band starting L wall-seconds late at rate r needs offset L·r)
  *   rate: number,               // tempo multiplier for live performance, 0.5..1.5, default 1
  *   mode: 'track'|'band'|'manual', // perform mode this song opens in, default 'track'
  *   instrumental: boolean,
@@ -144,12 +145,36 @@ lyrics/
  * }} Song */
 ```
 
-**Display time** of line `i`: `D(i) = lines[i].t + song.offset`. The clock always
-runs in **song time** (0 = start of the recording). Offset is applied only
-when comparing against display times, so nudging the offset never moves the
-clock.
+**Invariants**
+- `lines` are sorted by `t`, non-decreasing. **Equal `t` is allowed and
+  means "show these lines together"** (two-row or bilingual LRC).
+- A `''` marker whose `t` equals a sung line's `t` is dropped.
+- A run of consecutive `''` markers keeps only the first.
+- No `''` marker comes first.
+- For timing `synced` or `tapped`, `duration ≥ lastLine.t + 1` holds by
+  **raising duration, never by moving lines**. Only `estimated` songs fit
+  their lines to the duration.
+
+**Time domains**
+- **Song time**: what the clock runs in. 0 is the start of the recording.
+  The clock always runs in song time.
+- **Display time** of line `i`: `D(i) = lines[i].t + song.offset`. Line i
+  has started iff `D(i) <= time`, where `time` is clock time. Callers never
+  add the offset to `time`. Offset is applied only in that comparison, so
+  nudging it never moves the clock.
+- **Clock duration**: `clockDuration(song) = song.duration + max(0, song.offset)`
+  (song.js). Use it for the perform clock's duration, the scrubber range,
+  "−remaining", and the `duration` argument of lineProgress, gapInfo and
+  holdPoint.
 
 **Sung line**: `lines[i].text !== ''`.
+
+**Two offsets, opposite signs (on purpose)**
+- In LRC files, a positive `[offset:+N]` makes lyrics appear **earlier**.
+  It's baked into `t` at parse time.
+- `Song.offset` positive makes lyrics appear **later**.
+- The two values are unrelated. Nothing ever derives `Song.offset` from an
+  LRC offset tag.
 
 ## Module contracts
 
@@ -159,7 +184,7 @@ export function clamp(x, lo, hi)           // NaN → lo
 export function formatTime(sec)            // → "m:ss" (75.4 → "1:15", floors seconds); <0/NaN → "0:00"; ≥ 3600 → "h:mm:ss"
 export function formatOffset(sec)          // 0.5 → "+0.5s", -1 → "−1.0s", 0 → "0.0s" (U+2212 minus)
 export function parseTime(str)             // "3:25" | "03:25" | "205" | "3:25.5" | "1:02:03" | " 3:05 " → seconds | null
-                                           // invalid: "", "abc", "3:75", "-1", "1:2:3:4" → null
+                                           // invalid: "", "abc", "3:75", "-1", "1:2:3:4" → null. NOT used for LRC tags.
 export function normalizeForMatch(str)     // lowercase; strip diacritics (NFD + remove \p{M}); drop "(feat. …)", "[…]",
                                            // " - Remastered …", " - Live …", " - Radio Edit"; '&' → 'and';
                                            // collapse non-[a-z0-9] to single spaces; trim
@@ -168,134 +193,160 @@ export function escapeHtml(str)
 
 ### `js/lrc.js` (pure)
 ```js
-export function isLrc(text)                // true iff ≥ 1 line matches /^\s*\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]/
-export function parseLrc(text)
-  // → { lines: Line[], meta: { ti?: string, ar?: string, al?: string, length?: number, offsetMs?: number } }
-  // Timestamp forms: [m:ss] [mm:ss] [mmm:ss] with optional fraction [.x] [.xx] [.xxx] or [:xx].
-  //   The fraction is a DECIMAL fraction of a second: ".5" = 0.5s, ".50" = 0.5s, ".500" = 0.5s, ".05" = 0.05s.
-  //   A ':xx' fraction is centiseconds (":30" = 0.30s). Seconds ≥ 60 → the tag is invalid and ignored.
-  // Several tags on one line ("[00:12.00][01:30.00]text") → one Line per tag with the same text.
-  // Metadata tags (case-insensitive key): ti ar al au by re ve length offset. [length: 3:25] → parseTime.
-  //   [offset:+250] / [offset:-250] → meta.offsetMs. Convention (LRC standard): a POSITIVE offset makes
-  //   lyrics appear EARLIER, so every t = t - offsetMs/1000. Applied at parse time; serializeLrc never
-  //   writes an offset tag.
-  // Text: strip word-level tags /<\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?>/g, then trim, then collapse internal whitespace runs to one space.
-  // Timed lines with empty text → '' gap markers. Untimed non-metadata lines are ignored.
-  // CRLF/CR line endings and a leading BOM (U+FEFF) are handled.
-  // Output: sorted by t ascending, STABLE (equal t keep source order); t clamped to ≥ 0 (after offset);
-  //   gap markers dropped if first in the list; consecutive gap markers collapsed to the first;
-  //   a gap marker with the same t as the following sung line is dropped.
-export function serializeLrc(lines)        // Line[] → "[mm:ss.xx]text\n"…; minutes zero-padded to ≥ 2 digits; centiseconds
-                                           // ROUNDED (59.996 → "01:00.00", carrying into minutes). Sections are not representable and
-                                           // are dropped. Round-trip: parseLrc(serializeLrc(x)).lines matches x within 0.005s (minus sections,
-                                           // minus normalizations above).
+export const TIME_TAG = /^\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/   // shared by isLrc and parseLrc
+  // seconds value: t = min*60 + sec + (frac ? Number('0.' + frac) : 0)
+  //   [00:12.5] = [00:12.50] = [00:12.500] = 12.5;  [00:12.05] = 12.05;  [00:20:30] = 20.30 (a third field is ALWAYS a fraction,
+  //   never hours). sec must be 0..59, otherwise the tag is not a time tag.
+export const SECTION_WORDS  // ['intro','verse','pre-chorus','prechorus','chorus','post-chorus','hook','refrain','bridge',
+                            //  'breakdown','interlude','instrumental','solo','outro','tag','coda']
+export function parseSectionHeader(line)   // → label string ("Chorus", "Verse 2", "Pre-Chorus") | null. Grammar (case-insensitive,
+  // whole trimmed line): [Label] | (Label) | {Label} where Label = known word + optional number + optional ": anything"
+  // (e.g. "[Chorus: Name]" → "Chorus"); or "Label:" ; or bare "Label" (known word + optional number). Title-cased word + number.
+export function isLrc(text)
+  // timed = lines whose start (after optional whitespace) matches TIME_TAG; content = non-blank lines that are not metadata tags.
+  // true iff timed ≥ 1 AND timed ≥ 50% of content lines.
+export function parseLrc(text, { keepUntimed = false } = {})
+  // → { lines: Line[], meta: { ti?, ar?, al?, length?: number, offsetMs?: number }, untimed: number }
+  // - CRLF/CR and a leading BOM handled. Leading whitespace before tags allowed.
+  // - Only the LEADING RUN of time tags is consumed (whitespace between tags allowed). "[00:12.00][01:30.00]text" → two Lines.
+  //   The text after the run is trimmed; any later "[..]" stays in the text. Word tags /<\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?>/g
+  //   are removed, then whitespace runs collapse to one space.
+  // - Metadata: a whole line /^\[(ti|ar|al|au|by|length|offset|re|ve|#):(.*)\]$/i. length → parseTime (null ignored).
+  //   offset: optional whitespace/sign, integer or decimal ms; invalid → ignored; several → the LAST wins.
+  //   The offset applies to ALL timed lines wherever the tag appears: t = max(0, t - offsetMs/1000) (clamp AFTER shifting).
+  //   meta.offsetMs is informational only: lines are already shifted and no caller may apply it again.
+  // - An untimed line matching parseSectionHeader (and not a metadata key) sets `section` on the next timed SUNG line.
+  // - Other untimed, non-blank, non-metadata lines are counted in `untimed`. keepUntimed=false → dropped.
+  //   keepUntimed=true → each run of m untimed lines between timed source lines at ta and tb gets
+  //   t = ta + (tb - ta) * k/(m+1), k = 1..m (ta = 0 before the first timed line; after the last timed line t = ta + 2k;
+  //   if tb < ta all get ta). Interpolated lines keep source position for the stable sort.
+  // - Empty text after a tag → '' gap marker.
+  // - Sort: stable by (t, source line number, tag position within the line). Then: exact duplicate (t, text) pairs keep one;
+  //   '' markers equal in t to a sung line are dropped; consecutive '' runs keep only the FIRST; a leading '' is dropped.
+  // Fixture: tests/fixtures/synced-tricky.lrc → t = [4.5, 10, 14.75, 19.8, 24.5, 29.5, 34.5, 39.5, 59.5, 64.5]
+  //   (34.5 is the only '' marker; 'Word level tags' at 39.5; meta.offsetMs = 500, meta.length = 90; untimed = 1).
+export function serializeLrc(lines, meta = {})
+  // Emits [ti:], [ar:], [al:], [length:m:ss] from meta when present. NEVER emits [offset:].
+  // Each line: cs = Math.round(t*100); mm = floor(cs/6000) zero-padded to ≥ 2; ss = floor((cs%6000)/100) padded 2; xx = cs%100 padded 2
+  //   → "[mm:ss.xx]text". 59.999 → "[01:00.00]". A line with a section is preceded by its label on its own line: "[Chorus]".
+  // Round-trip: parseLrc(serializeLrc(x.lines, x.meta)).lines deep-equals x.lines within ±0.005 s, sections included.
 export function parsePlain(text)
   // → Array<{ text: string, section?: string }> (no times)
   // - CRLF/BOM handled; each line trimmed; internal whitespace collapsed.
-  // - A run of ≥ 1 blank lines between lyric lines → ONE '' gap marker. Leading/trailing gaps are removed.
-  // - SECTION HEADERS are not lyric lines. A header is a line that matches entirely (case-insensitive):
-  //     [Label] or (Label) or {Label}   where Label starts with a known section word, e.g. "[Chorus: Name]", "(Verse 2)"
-  //     Label:                          (a known section word + optional number + colon, nothing after the colon)
-  //     Label                           (a bare known section word + optional number, e.g. "Bridge", "Verse 2")
-  //   Known words: intro, verse, pre-chorus, prechorus, chorus, post-chorus, hook, refrain, bridge, breakdown,
-  //     interlude, instrumental, solo, outro, tag, coda. The label kept is the word (title-cased) plus number:
-  //     "[Chorus: Name]" → "Chorus", "verse 2:" → "Verse 2", "PRE-CHORUS" → "Pre-Chorus".
-  //   The label goes on the next lyric line as `section`. If the header is not the first item and the
-  //   previous item is not already a gap marker, a gap marker is inserted before that line.
+  // - A run of ≥ 1 blank lines between lyric lines → ONE '' gap marker. Leading/trailing gaps removed.
+  // - Section headers (parseSectionHeader) are not lyric lines: the label goes on the next lyric line as `section`;
+  //   if the header is not first and the previous item is not already a gap marker, a gap marker is inserted before that line.
   //   Headers with no lyric line after them are dropped.
-  // - A line in square brackets that is NOT a known section (e.g. "[Spoken softly]") is kept as a lyric line.
-  // - Timestamped lines are never headers.
-export function lyricsToEditableText(song) // timing 'synced'|'tapped' → serializeLrc(song.lines); 'estimated' → song.rawPlain
+  // - A bracketed line that is NOT a known section (e.g. "[Spoken softly]") is kept as a lyric line.
+  // Fixture: tests/fixtures/plain-with-sections.txt → 4 gap-separated stanzas, sections Verse 1, Chorus, Verse 2, Chorus.
+export function lyricsToEditableText(song) // 'synced'|'tapped' → serializeLrc(song.lines); 'estimated' → song.rawPlain
 ```
 
 ### `js/timing.js` (pure)
-Notation: `D(i) = lines[i].t + offset`; "sung" means `text !== ''`.
+Notation: `D(i) = lines[i].t + offset`. "Sung" means `text !== ''`. Every `time` parameter is clock time (song seconds).
 ```js
-export function countSyllables(text)       // ≥ 1 for any non-empty text with at least one letter/number; 0 for '' or symbols-only.
-                                           // Heuristic per word: vowel groups [aeiouy]+ (after NFD + lowercase), minus a silent final
-                                           // 'e' (but not "-le" after a consonant), min 1 per word; digits count 1 per digit group;
-                                           // non-Latin letters: 1 per 2 letters (rounded up). Never throws.
-export function estLineSeconds(text)       // clamp(countSyllables(text) * 0.32, 1.5, 6); '' → 0
+export function countSyllables(text)       // ≥ 1 for any text with a letter/number; 0 for '' or symbols-only. Per word (after NFD+lowercase):
+                                           // vowel groups [aeiouy]+, minus a silent final 'e' (not "-le" after a consonant), min 1 per word;
+                                           // a digit group counts 1; non-Latin letters count 1 per 2 letters (rounded up). Never throws.
+export function estLineSeconds(text)       // '' → 0; else clamp(countSyllables(text) * 0.32, 1.5, 6)
+export function lineWeight(line, gapWeight)// sung: max(3, countSyllables(text)); '': gapWeight
+export function estimateParams(duration, { leadIn = null, outro = null } = {})
+  // → { duration, leadIn, outro } effective values. duration non-finite or < 1 → 210. leadIn null/non-finite → clamp(duration*0.07, 4, 20);
+  // outro null/non-finite → clamp(duration*0.06, 3, 20); negatives → 0. If leadIn + outro > 0.8*duration: k = 0.8*duration/(leadIn+outro),
+  // leadIn *= k, outro *= k.
 export function estimateTimings(plainLines, duration, opts = {})
-  // plainLines: Array<{text, section?}>; opts: { leadIn?: number|null, outro?: number|null, gapWeight?: number }
-  // leadIn  = opts.leadIn ?? clamp(duration*0.07, 4, 20);  outro = opts.outro ?? clamp(duration*0.06, 3, 20)
-  // both clamped ≥ 0; if leadIn + outro > duration*0.8 they are scaled by (duration*0.8)/(leadIn+outro).
-  // window = duration - leadIn - outro (> 0 by the above).
-  // weight(sung) = max(3, countSyllables(text)); weight(gap) = gapWeight ?? mean sung weight (3 if none).
-  // t[i] = leadIn + window * (sum of weights before i) / totalWeight   → monotonic non-decreasing, t[0] = leadIn,
-  //   the last line starts before duration - outro. Same length/order as input; sections preserved.
-  // Empty input → []. duration ≤ 0 or non-finite → treated as 210.
-export function activeLineIndex(lines, time, offset = 0)
-  // largest i with D(i) <= time, or -1. Binary search. With equal t values, returns the LAST of the run.
-export function nextSungIndex(lines, i)    // smallest j > i with lines[j] sung, else -1  (i may be -1)
+  // opts: { leadIn?, outro?, gapWeight? }. p = estimateParams(duration, opts); window = p.duration - p.leadIn - p.outro.
+  // gapWeight non-finite or ≤ 0 → mean of max(3, syllables) over sung lines (3 if none).
+  // t[i] = p.leadIn + window * (sum of weights before i) / totalWeight → STRICTLY increasing (all weights > 0), t[0] = leadIn.
+  // Same length/order as input; sections preserved. Empty input → []. Tests: 1 line at 210 → [14.7]; duration 5 → leadIn = 16/7;
+  // [{text:''}] → finite; leadIn -5 → first t ≥ 0.
+export function activeLineIndex(lines, time, offset = 0)  // largest i with D(i) <= time, or -1. Binary search. Equal t → LAST of the run.
+export function activeSpan(lines, time, offset = 0)
+  // → { start, end } inclusive; end = activeLineIndex; start = smallest k ≤ end with lines[k].t === lines[end].t; none → { start: -1, end: -1 }.
+  // Perform shows start..end as current and anchors the scroll on start. Test: t [5,5,9]: at 5 → {0,1}; 4.99 → {-1,-1}; 9 → {2,2}.
+export function nextSungIndex(lines, i)    // smallest j > i with lines[j] sung, else -1 (i may be -1)
 export function prevSungIndex(lines, i)    // largest j < i with lines[j] sung, else -1
 export function firstSungIndex(lines)      // nextSungIndex(lines, -1)
 export function lastSungIndex(lines)
-export function sungAtOrBefore(lines, i)   // i if lines[i] sung, else prevSungIndex(lines, i); -1 if none (i = -1 → -1)
-export function lineEnd(lines, c, offset)
-  // estimated end of sung line c: min(D(c) + estLineSeconds(text_c), D(k)) where k is the first index > c that is
-  // either a gap marker or a sung line (i.e. simply the next line of any kind); if no next line, D(c) + estLineSeconds.
+export function lineEnd(lines, i, offset, duration)
+  // next = smallest k > i with lines[k].t > lines[i].t; nextStart = next exists ? D(next) : duration.
+  // sung line: min(nextStart, D(i) + estLineSeconds(text)); '' marker: nextStart.
 export function lineProgress(lines, i, time, offset, duration)
-  // i < 0 → 0. Otherwise (time - D(i)) / (E - D(i)), clamped 0..1, where E = D(next line of any kind) or duration;
-  // if E <= D(i) → 1.
+  // i < 0 → 0; else clamp((time - D(i)) / (lineEnd(lines,i,offset,duration) - D(i)), 0, 1); zero length → 1.
 export function gapInfo(lines, time, offset, duration, threshold = 6)
-  // → null | { kind: 'intro'|'break'|'outro', secondsUntilNext, nextIndex, progress }   (progress 0..1)
-  // f = firstSungIndex(lines); if f === -1 → null.
-  // INTRO: time < D(f): if D(f) >= threshold → { 'intro', D(f) - time, f, clamp(time / D(f), 0, 1) } else null.
-  // Otherwise c = sungAtOrBefore(lines, activeLineIndex(lines, time, offset)); n = nextSungIndex(lines, c); e = lineEnd(lines, c, offset).
-  // OUTRO: n === -1 and time >= e → { 'outro', max(0, duration - time), -1, duration > e ? clamp((time-e)/(duration-e),0,1) : 1 }.
-  // BREAK: n !== -1 and (D(n) - e) >= threshold and time >= e → { 'break', D(n) - time, n, clamp((time - e)/(D(n) - e), 0, 1) }.
-  // Else null.
+  // No sung lines → null. s = largest sung index with D(s) <= time (-1 if none); n = smallest sung index with D(n) > time (-1 if none);
+  // e = last index of s's equal-t run (lines with the same t as s).
+  //   intro (s === -1):            waitStart = 0,                               waitEnd = D(n)
+  //   break (s !== -1, n !== -1):  waitStart = lineEnd(lines, e, offset, duration), waitEnd = D(n)
+  //   outro (n === -1):            waitStart = lineEnd(lines, e, offset, duration), waitEnd = duration
+  // null unless time >= waitStart AND waitEnd - waitStart >= threshold. Otherwise
+  // { kind, nextIndex: n, secondsUntilNext: max(0, waitEnd - time), progress: clamp((time - waitStart)/(waitEnd - waitStart), 0, 1) }.
+  // The pill shows Math.ceil(secondsUntilNext). Tests: sung at 10 (est 2 s) and 30, threshold 6: 11.9 → null; 12 → break,
+  // secondsUntilNext 18, progress 0; 29.5 → break; 30 → null. With a '' marker at 11 the break starts at 11. First sung line at
+  // display time 4 → no intro. lines [] → null.
 export function holdPoint(lines, time, offset, duration, { threshold = 6, lead = 0.45 } = {})
-  // Band mode. g = gapInfo(lines, time, offset, duration, threshold); g null or 'outro' → null;
-  // else max(time, D(g.nextIndex) - lead) — i.e. where the clock must stop and wait for the singer's cue.
-  // (Clamped to time when that point has already passed, as happens for breaks shorter than `lead`.)
-export function cueIndex(lines, time, offset, dir, { snap = 1.2 } = {})
-  // Pedal semantics, "the line I mean is starting NOW". dir 'next' | 'prev'. Returns a line index or -1 (no-op).
+  // Band mode. g = gapInfo(...); g null or g.kind === 'outro' → null; else { at: D(g.nextIndex) - lead, nextIndex: g.nextIndex }.
+  // (Because threshold ≥ 3 > lead, `at` always lies inside the wait.)
+export function cueIndex(lines, time, offset, dir, { started = true, snap = 1.2 } = {})
+  // Pedal semantics: "the line I mean is starting NOW". dir 'next' | 'prev'. Returns a sung line index, or -1 (no-op).
   // f = firstSungIndex; f === -1 → -1.
-  // Before the first line (time < D(f)): next → f; prev → -1.
-  // Else c = sungAtOrBefore(lines, activeLineIndex(lines, time, offset)); n = nextSungIndex(lines, c).
-  //  next: s = n === -1 ? snap : min(snap, 0.5 * (D(n) - D(c)));  time - D(c) < s → c  (confirm a line that just lit up)
-  //        else → n (may be -1: nothing after the last line).
-  //  prev: p = prevSungIndex(lines, c); → p !== -1 ? p : c.
-export function shiftLines(lines, delta, duration) // new array, every t += delta, clamped to [0, duration]; order kept (stable sort after clamp)
-export function validateLines(lines, duration)     // new sorted (stable) array: drops entries with non-finite t or non-string text,
-                                                   // clamps t to [0, duration], truncates text to 1000 chars, caps at 5000 lines. Never throws.
+  // Not started (pre-roll), or time < D(f): next → f; prev → -1.
+  // Else span = activeSpan(lines, time, offset); c = sung line at or before span.start (span.start if sung, else prevSungIndex);
+  //   cEnd = last index of c's equal-t run; n = nextSungIndex(lines, cEnd).
+  //   next: s = n === -1 ? snap : min(snap, 0.5 * (D(n) - D(c)));  time - D(c) < s → c (confirm a line that just lit up), else n.
+  //   prev: p = prevSungIndex(lines, c) — then move p to the START of its equal-t run; p === -1 → c.
+  // Tests: the double-advance case (line lit 0.4 s early, press next → same line); lines ['' @0, A @9.5, B @14.2]: not started → A;
+  //   playing at 10.5 → A (1.0 s < snap 1.2: confirms A); at 12 → B; after the last line next → -1; prev from B → A; equal-t pairs.
+export function shiftLines(lines, delta)   // new array, t = max(0, t + delta); no upper clamp; order kept (stable). Caller raises duration.
+export function validateLines(lines, duration, { fit = false } = {})
+  // New array: drops entries with non-finite t or non-string text; t = max(0, t); text truncated to 1000 chars; ≤ 5000 lines;
+  // stable sort; applies the marker invariants above. fit=true (estimated songs only) also clamps t ≤ duration. Never throws.
 ```
 
 ### `js/clock.js` (pure)
 ```js
 export class Clock {
   constructor({ now = () => performance.now() / 1000, wallNow = () => Date.now() / 1000, duration = Infinity } = {})
-  get time()          // song time in seconds, clamped to [0, duration]. While playing: anchorTime + (now() - anchorNow) * rate.
-                      // Reading time checks for the end: if it reaches duration while playing, the clock stops
-                      // (playing = false, time = duration) and 'ended' fires once.
-  get playing()       // boolean
+  // GETTERS ARE PURE (no events, no state changes):
+  get time()          // _playing ? anchorTime + (now() - anchorNow) * rate : anchorTime, clamped to [0, duration]
+  get ended()         // time >= duration (finite duration only)
+  get playing()       // _playing && !ended — reads false the moment time reaches duration, even before any tick
   get rate()
-  get duration()      // set duration(d): d > 0 finite or Infinity; re-anchors; clamps time
-  get ended()         // time >= duration (duration finite)
-  play()              // no-op if playing or ended (Restart is explicit: seek(0) then play()). Re-anchors; emits 'play'.
-  pause()             // no-op if paused. Freezes time; emits 'pause'.
+  get duration()
+  // State changes (each re-anchors: anchorTime = time, anchorNow = now(), anchorWall = wallNow()):
+  // "Auto-end" check, run at the START of tick(), play(), pause(), seek(), nudge(), setRate() and the duration setter:
+  //   if _playing and the computed time >= duration → anchorTime = duration, _playing = false, THEN emit 'ended' exactly once.
+  //   No 'pause' event on auto-end.
+  play()              // no-op (no event) if playing OR ended — restarting is explicit: seek(0) then play(). Emits 'play'.
+  pause()             // no-op (no event) if not playing. Emits 'pause'.
   toggle()
-  seek(t, reason = 'user') // clamps to [0, duration]; keeps play state; re-anchors; clears ended (if t < duration);
-                      // emits 'seek' with { time, reason }. Seeking to ≥ duration while playing → stops and fires 'ended'.
+  seek(t, reason = 'user') // non-finite t ignored; clamped to [0, duration]; keeps _playing; emits 'seek' { time, reason }.
+                      // If it was playing and t >= duration: also stops and emits 'ended' after 'seek'. Paused seek to the end:
+                      // ended = true, no 'ended' event.
   nudge(dt)           // seek(time + dt, 'nudge')
-  setRate(r)          // clamps to [0.5, 1.5]; time continues without a jump (re-anchor first); emits 'rate'
+  setRate(r)          // non-finite ignored; anchor at the OLD rate first, then rate = clamp(r, 0.5, 1.5); emits 'rate' only if changed
+  set duration(d)     // ignored unless d > 0 (Infinity allowed); paused → anchorTime = min(anchorTime, d); raising d after the end
+                      // makes ended false but does not resume
   reset()             // pause(); seek(0, 'reset')
-  resync()            // Corrects suspension drift: while playing,
-                      //   drift = (wallNow() - anchorWall) - (now() - anchorNow)
-                      //   if 0.25 < drift < 21600: anchorTime += drift * rate, re-anchor, emit 'seek' { reason: 'resync' }, return drift.
-                      // Otherwise (paused, drift ≤ 0.25 or negative/absurd) → 0. Never moves time backwards.
-  tick()              // call once per animation frame. If more than 1 s of now() passed since the previous tick, call resync() first.
-                      // Returns `time` (and so may fire 'ended').
-  on(event, fn, { signal } = {}) → unsubscribe   // events: 'play','pause','seek','rate','ended'.
-                      // Listener errors are caught and reported with console.error, so they don't break the clock.
-  snapshot()          // → { time, playing, rate, wallMs: wallNow()*1000 } for the live-session record
-  static restore(snap, opts) // → Clock with time = snap.playing ? snap.time + (wallNow()*1000 - snap.wallMs)/1000 * snap.rate : snap.time
-                      // (clamped), same rate, playing iff snap.playing && time < duration
+  resync()            // While playing: drift = (wallNow() - anchorWall) - (now() - anchorNow); if 0.25 < drift < 21600:
+                      //   anchorTime += drift * rate, re-anchor, emit 'seek' { time, reason: 'resync' }, return drift. Otherwise 0.
+                      //   Never moves time backwards (negative drift, e.g. a wall-clock jump back, → 0).
+  tick()              // If more than 1 s of now() passed since the previous tick → resync() first. Then auto-end check. Returns time.
+  on(event, fn, { signal } = {}) → unsubscribe   // events: 'play','pause','seek','rate','ended'. Listener errors are caught +
+                      // console.error'd. An aborted signal removes the listener.
+  snapshot()          // → { time, playing, rate, wallMs: wallNow() * 1000 }
+  static restore(snap, { now, wallNow, duration } = {})
+                      // → Clock: rate = snap.rate; time = snap.playing ? snap.time + (wallNow()*1000 - snap.wallMs)/1000 * rate : snap.time
+                      //   (clamped to duration); playing iff snap.playing && time < duration.
 }
 ```
-Every re-anchor records anchorTime, anchorNow = now(), and anchorWall = wallNow().
+Tests use fake `now`/`wallNow`. Example: duration 10. Play at 0, then
+advance now by 12. Time reads 10, playing reads false, ended reads true, and
+no event fires until `tick()`, which emits `ended` once. A second `tick()`
+emits nothing. At time 4, `setRate(1.2)` leaves time at 4. In a 30 s
+suspension where `now()` advances 0 and `wallNow()` advances 30, `resync()`
+moves time by +30 × rate. A backwards wall-clock jump is ignored. While
+paused, `resync()` returns 0.
 
 ### `js/song.js` (pure)
 ```js
@@ -303,42 +354,52 @@ export const SCHEMA = 1
 export const DEFAULT_DURATION = 210
 export const LIMITS = { title: 300, lineText: 1000, lines: 5000, duration: 21600 }
 export function newId()                    // crypto.randomUUID() if available, else 32 hex chars from crypto.getRandomValues;
-                                           // Math.random only if neither exists (Node < 19 fallback)
+                                           // Math.random only if neither exists
+export function clockDuration(song)        // song.duration + max(0, song.offset)
+export function lastT(lines)               // max t, or 0
 export function songFromLrclib(cand, now = Date.now())
-  // cand: Candidate (see lrclib.js). If cand.syncedLyrics is non-empty → timing 'synced', lines = parseLrc(...).lines.
-  // Else if plainLyrics → 'estimated' via estimateTimings. Instrumental or no lyrics → lines [], instrumental true.
-  // duration = cand.duration > 0 ? cand.duration : (synced ? last t + 5 : DEFAULT_DURATION); any line t > duration
-  // extends duration to that t + 5 (LRCLIB durations can be wrong).
-  // source { provider:'lrclib', lrclibId }, rawPlain = plainLyrics || derived from synced lines (texts joined, '' → blank line),
-  // rawSynced = syncedLyrics || '', mode 'track'.
+  // cand: Candidate (lrclib.js). cand.syncedLyrics with ≥ 1 timed line → timing 'synced', lines = parseLrc(synced).lines.
+  // Else plainLyrics → 'estimated' via estimateTimings(parsePlain(...)). Instrumental/no lyrics → lines [], instrumental true.
+  // duration: synced → max(cand.duration || 0, lastT + 5); else cand.duration > 0 ? cand.duration : DEFAULT_DURATION.
+  // source { provider:'lrclib', lrclibId }; rawPlain = plainLyrics || derived from synced lines (texts joined by '\n', '' → blank line);
+  // rawSynced = syncedLyrics || ''; offset 0; rate 1; mode 'track'; estimate { leadIn: null, outro: null }.
 export function songFromText({ title, artist = '', album = '', text, duration }, now = Date.now())
-  // isLrc(text) → 'synced' (duration falsy → max(meta.length || 0, last t + 5)); else plain → 'estimated'
-  // (duration falsy → DEFAULT_DURATION). source { provider:'manual' }. Title '' → 'Untitled'.
-export function songFromDemo(now = Date.now())  // from js/demo.js; id DEMO_ID, provider 'demo', timing 'synced'
+  // isLrc(text) → 'synced' with parseLrc(text, { keepUntimed: true }); duration = typed || meta.length ? max(typed || meta.length, lastT + 1)
+  //   : lastT + 5. Else plain → 'estimated', duration = typed || DEFAULT_DURATION. Title '' → 'Untitled'. source { provider:'manual' }.
+  // Returns { song, untimed } so the UI can say "N lines had no timestamp; their times were estimated."
+export function songFromDemo(now = Date.now())  // js/demo.js → id DEMO_ID, provider 'demo', timing 'synced', duration DEMO_META.duration
 export function updateSongText(song, text, now = Date.now())
-  // Re-parses edited lyric text. LRC → lines from parseLrc; timing stays 'tapped' if it was 'tapped', else 'synced';
-  // rawSynced = text; rawPlain derived. Plain → 'estimated' with song.estimate; rawPlain = text. Duration grows to fit (last t + 5).
-  // Returns a NEW song (inputs are never mutated); updatedAt = now.
+  // → { song, untimed }. LRC (isLrc) → lines = parseLrc(text, { keepUntimed: true }).lines; timing 'tapped' stays 'tapped', otherwise
+  //   'synced'; rawSynced = text; duration = max(song.duration, lastT + 1). Plain → 'estimated' with song.estimate; rawPlain = text.
+  // NEW song (inputs never mutated); updatedAt = now. offset/rate/mode unchanged.
 export function retime(song, { duration, leadIn, outro } = {}, now = Date.now())
-  // Estimated songs: recompute lines from rawPlain with the new estimate. Others: update duration only, clamping lines.
-  // leadIn/outro: undefined = keep, null = automatic. Returns a NEW song.
-export function applyTappedTimes(song, times, now = Date.now())
-  // times: (number|null)[] aligned to song.lines. Result: timing 'tapped', NEW song, lines monotonic non-decreasing.
-  // - Tapped entries keep their time; any tap lower than the previous tapped time is raised to it.
-  // - Untapped entries between two tapped ones: linear interpolation by index.
-  // - Untapped entries before the first tap: placed proportionally (by index) between 0 and the first tap.
-  // - Untapped entries after the last tap: spread evenly between lastTap + 2s and max(lastTap + 2, duration - outro),
-  //   outro = clamp(duration*0.06, 3, 20); if there is no room they all get lastTap + 2 (+0.5s each, clamped to duration).
-  // - No taps at all → song returned unchanged (same object).
-  // - duration = max(duration, last time + 1).
-export function normalizeSong(obj)
-  // Tolerant coercion of partial or old records into a valid Song; never throws. Builds a NEW object from whitelisted
-  // fields only (never spreads the input, so no __proto__/junk). Applies MIGRATIONS for schema < SCHEMA.
-  // schema > SCHEMA → returns the input's known fields plus readOnly: true (other fields kept as-is).
+  // leadIn/outro: undefined = keep, null = auto, number = fixed. Estimated → recompute lines from rawPlain with the new duration/estimate.
+  // Synced/tapped → duration = max(patch.duration ?? duration, lastT + 1); lines deep-equal to the input.
+  // Test: synced, last t = 200, retime({ duration: 180 }) → duration 201, lines unchanged. Returns a NEW song.
+export function applyTappedTimes(song, times, { endTime = 0, now = Date.now() } = {})
+  // (1) T[i] = times[i] if finite and ≥ 0, else null, for i < lines.length; extra entries ignored.
+  // (2) No taps → return the song unchanged (same object).
+  // (3) Non-decreasing in index order: T[i] = max(T[i], previous tapped value).
+  // (4) D' = max(song.duration, endTime, max tapped).
+  // (5) w(i) = lineWeight (estimateTimings weights, gapWeight = mean sung weight); W(a..b) inclusive sum.
+  //     Before the first tap f: t_j = T[f] * W(0..j-1) / W(0..f-1).
+  //     Between taps a < b: t_j = T[a] + (T[b] - T[a]) * W(a..j-1) / W(a..b-1).
+  //     After the last tap l (n lines): E = max(D' - outro, T[l] + 1.5*(n-1-l)), outro = estimateParams(D', song.estimate).outro;
+  //       D' = max(D', E); t_j = T[l] + (E - T[l]) * W(l..j-1) / W(l..n-1).
+  // (6) → NEW song: timing 'tapped', duration max(D', last t + 1), sections preserved, offset/rate unchanged (taps are raw song time),
+  //     rawSynced = serializeLrc(lines). Lines then go through validateLines (marker invariants).
+  // Tests: [A, '', B] with taps [40, null, 60] → '' at 40 + 20*w(A)/(w(A)+w('')); [A, B] taps [10, null], duration 12 → E = 11.5,
+  //   B strictly between 10 and 11.5.
+export const MIGRATIONS  // { [fromSchema]: (obj) => obj } — empty for schema 1
+export function normalizeSong(obj, now = Date.now())
+  // Tolerant coercion of partial/old records into a valid Song; never throws. Builds a NEW object from whitelisted fields only
+  // (never spreads input). Applies MIGRATIONS for schema < SCHEMA. schema > SCHEMA → returns the record as-is plus readOnly: true.
+  // Defaults: mode 'track', rate 1 (clamped 0.5..1.5), offset 0 (clamped -30..30), estimate {null,null}, timing 'estimated' if unknown.
+  // Lines → validateLines(lines, duration, { fit: timing === 'estimated' }); synced/tapped → duration raised to ≥ lastT + 1.
 export function validateSongInput(obj, now = Date.now())
-  // For imports: → { ok: true, song } | { ok: false, reason }. Requires a non-empty string title (truncated to 300),
-  // lines an array of ≤ 5000 entries each with finite t and string text (truncated to 1000), a finite duration in (0, 21600]
-  // (or derivable). An id not matching /^[A-Za-z0-9_-]{1,64}$/ is replaced by newId(). updatedAt is clamped to ≤ now + 86400000.
+  // Imports → { ok: true, song } | { ok: false, reason }. Requires a non-empty string title (truncated to 300); lines an array of
+  // ≤ 5000 entries, each with finite t and string text (truncated to 1000); a finite duration in (0, 21600] (missing → derived as
+  // lastT + 5 for synced/tapped, else 210). Invalid id (/^[A-Za-z0-9_-]{1,64}$/) → newId(). updatedAt ≤ now + 86400000.
   // Output goes through normalizeSong.
 export function songSummary(song)          // { id, title, artist, duration, timing, mode, sungLines, lastPlayedAt, playCount }
 export function sameSong(a, b)             // normalizeForMatch(title) and normalizeForMatch(artist) both equal
@@ -747,10 +808,14 @@ export function fmtDate(ms)               // → "Oct 25, 2026" (toLocaleDateStr
 - **Render loop** (rAF; stops when `ctx.signal` aborts and isn't
   rescheduled while `document.hidden`):
   - `t = clock.tick()`.
-  - The scroll target is `activeLineIndex(lines, t + scrollLead, offset)`,
-    so the column starts moving `scrollLead` early and has settled when the
-    line begins.
-  - The highlighted line is `activeLineIndex(lines, t, offset)`.
+  - Let `dur = clockDuration(song)`; `clock.duration = dur` on mount and
+    whenever the offset changes.
+  - The scroll target is `activeSpan(lines, t + scrollLead, offset).start`
+    (or the first sung line before playback starts), so the column starts
+    moving `scrollLead` early and has settled when the line begins.
+  - The highlighted lines are `activeSpan(lines, t, offset)`, shown
+    start..end together. Before the first line, nothing is highlighted, but
+    line 1 sits at the anchor.
   - Write the transform and classes only when these indices or the layout
     change. Per-frame writes are limited to the progress bar and the pill
     text, and the pill text is written only when its displayed integer
@@ -760,13 +825,14 @@ export function fmtDate(ms)               // → "Oct 25, 2026" (toLocaleDateStr
 
 **Modes** (`session.mode`, starts from `song.mode`, saved to the song with a 500 ms debounce on change)
 - **Track**: the clock runs freely. Countdowns use `gapInfo`.
-- **Band**: on each tick, `h = holdPoint(lines, t, offset, duration, { threshold: gapThreshold, lead: holdLead })`.
-  - If `h !== null`, `h !== session.releasedHold`, and `t >= h`: call
-    `clock.seek(h, 'hold')` and `clock.pause()`, and set state to `held`. The
+- **Band**: on each tick, `h = holdPoint(lines, t, offset, dur, { threshold: gapThreshold, lead: holdLead })`.
+  - If `h`, `h.nextIndex !== session.releasedHold`, and `t >= h.at`: call
+    `clock.seek(h.at, 'hold')` and `clock.pause()`, and set state to `held`. The
     pill reads "HOLD · next when you come in".
   - A next cue resumes through `cueIndex`. Pressing play while held resumes
-    from h and sets `releasedHold = h`, so the same point doesn't hold
-    again. A user seek resets `releasedHold`.
+    from `h.at` and sets `releasedHold = h.nextIndex`, so the same point
+    doesn't hold again. Any seek by the user or a cue resets
+    `releasedHold` to null.
   - The outro never holds. While a hold is approaching, the countdown shows
     "♪ ~0:12".
 - **Manual**: no clock (it's paused). Next/prev step `session.manualIndex`
@@ -781,7 +847,7 @@ export function fmtDate(ms)               // → "Oct 25, 2026" (toLocaleDateStr
   mode.
 
 **Cues** (pedal or keyboard next/prev, or a line tap while the controls are visible)
-- **Track/Band**: `i = cueIndex(lines, clock.time, offset, dir)`.
+- **Track/Band**: `i = cueIndex(lines, clock.time, offset, dir, { started: session.started })`.
   - If `i !== -1`: `clock.seek(D(i), 'cue')`. Then, if the clock is paused
     and either `dir === 'next' && settings.pedalNextStarts` or the session
     was held, call `clock.play()`.
@@ -876,16 +942,21 @@ pedalKeys take precedence over the defaults.
     markers are skipped and interpolated later.
   - A huge TAP area covers the bottom 40% of the screen, with a pointerdown
     handler.
+  - The sync clock is `new Clock({ duration: Infinity })` at rate 1. The
+    offset is ignored while highlighting.
   - Space, Enter, or any next pedal key records `taps[i] = clock.time` and
     advances.
   - Backspace, ←, or the Undo button removes the last tap and steps back.
   - Restart, Cancel and "Finish & save" are available. Untapped lines are
     estimated.
-- **Saving**: `applyTappedTimes`, then `putSong`, then navigate to edit.
-  Duration becomes `max(duration, clock.time)`.
+- **Saving**: "Finish & save" calls `applyTappedTimes(song, taps, { endTime: clock.time })`,
+  then `putSong`, then navigates to edit. Finish is disabled until there's
+  at least one tap.
 - Follows the no-interruption rule.
 
 ### Edit (`#/song/:id/edit`)
+- If `updateSongText` reports `untimed > 0`, toast "N lines had no
+  timestamp. Their times were estimated."
 - Fields: title, artist, album, duration (m:ss), mode (Track/Band/Manual) and
   the lyrics textarea (`lyricsToEditableText(song)`). Save runs
   `updateSongText` + `retime`, then `putSong`.
@@ -894,7 +965,7 @@ pedalKeys take precedence over the defaults.
 - **Estimated songs**:
   - Intro lead-in and outro sliders, in seconds, with Auto checkboxes for
     null.
-  - A live "first line at m:ss".
+  - A live "first line at m:ss", computed with `estimateParams`.
   - A notice: "Timing is estimated from the song length. For tight timing,
     use Sync by tapping."
 - Buttons: Save, Sync by tapping →, Perform →, Delete (with confirmation),
