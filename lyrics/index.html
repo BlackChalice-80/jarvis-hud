@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en" data-stage-theme="stage">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>StageLyrics</title>
+  <meta name="description" content="Big, time-synced scrolling lyrics for vocalists on stage. Works offline.">
+  <meta name="theme-color" content="#000">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="StageLyrics">
+  <meta name="application-name" content="StageLyrics">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <script>
+    // Apply the saved theme before the CSS loads, so a daylight user never sees a black flash.
+    try {
+      const saved = JSON.parse(localStorage.getItem('stagelyrics.settings') || '{}')
+      if (['stage', 'contrast', 'daylight'].includes(saved?.theme)) {
+        document.documentElement.setAttribute('data-stage-theme', saved.theme)
+      }
+    } catch {}
+  </script>
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/perform.css">
+  <link rel="stylesheet" href="css/views.css">
+  <script type="module" src="js/main.js"></script>
+</head>
+<body>
+  <main id="app">
+    <div class="boot" aria-hidden="true"><span class="spinner"></span></div>
+  </main>
+  <div id="toast-host" class="toast-host" aria-live="polite"></div>
+  <noscript>
+    <div class="noscript">
+      <h1>StageLyrics needs JavaScript</h1>
+      <p>Turn on JavaScript for this site, then reload the page.</p>
+    </div>
+  </noscript>
+</body>
+</html>
